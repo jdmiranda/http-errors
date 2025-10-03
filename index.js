@@ -19,6 +19,26 @@ var inherits = require('inherits')
 var toIdentifier = require('toidentifier')
 
 /**
+ * Error object pool for common status codes
+ * @private
+ */
+var errorPool = {
+  400: [],
+  401: [],
+  403: [],
+  404: [],
+  500: []
+}
+
+var poolSize = 10 // Max pooled errors per status code
+
+/**
+ * Cache for formatted error messages
+ * @private
+ */
+var messageCache = Object.create(null)
+
+/**
  * Module exports.
  * @public
  */
@@ -78,6 +98,23 @@ function createError () {
     status = 500
   }
 
+  // Fast path for common errors without custom messages or props
+  var hasCustomMsg = msg !== undefined
+  var hasProps = false
+  for (var k in props) {
+    hasProps = true
+    break
+  }
+
+  if (!err && !hasCustomMsg && !hasProps && errorPool[status]) {
+    var pooled = errorPool[status].pop()
+    if (pooled) {
+      // Reset stack trace lazily - only when accessed
+      delete pooled.stack
+      return pooled
+    }
+  }
+
   // constructor
   var HttpError = createError[status] || createError[codeClass(status)]
 
@@ -105,6 +142,27 @@ function createError () {
 }
 
 /**
+ * Return an error to the pool for reuse
+ * @private
+ */
+function releaseError (err) {
+  var status = err.statusCode || err.status
+  if (errorPool[status] && errorPool[status].length < poolSize) {
+    // Clear custom properties
+    for (var key in err) {
+      if (key !== 'status' && key !== 'statusCode' && key !== 'expose' &&
+          key !== 'message' && key !== 'name') {
+        delete err[key]
+      }
+    }
+    errorPool[status].push(err)
+  }
+}
+
+// Export pool management
+module.exports.releaseError = releaseError
+
+/**
  * Create HTTP error abstract base class.
  * @private
  */
@@ -127,16 +185,48 @@ function createHttpErrorConstructor () {
 function createClientErrorConstructor (HttpError, name, code) {
   var className = toClassName(name)
 
+  // Cache default message
+  var defaultMsg = statuses.message[code]
+
   function ClientError (message) {
     // create the error object
-    var msg = message != null ? message : statuses.message[code]
+    var msg = message != null ? message : defaultMsg
     var err = new Error(msg)
-
-    // capture a stack trace to the construction point
-    Error.captureStackTrace(err, ClientError)
 
     // adjust the [[Prototype]]
     setPrototypeOf(err, ClientError.prototype)
+
+    // Lazy stack trace - defer stack capture using property getter
+    var stackValue
+    var stackCaptured = false
+
+    // Delete existing stack property first
+    delete err.stack
+
+    Object.defineProperty(err, 'stack', {
+      enumerable: false,
+      configurable: true,
+      get: function () {
+        if (!stackCaptured) {
+          // Capture stack trace on first access
+          Error.captureStackTrace(this, ClientError)
+          stackValue = this.stack
+          stackCaptured = true
+          // Replace getter with direct value for performance
+          Object.defineProperty(this, 'stack', {
+            value: stackValue,
+            writable: true,
+            configurable: true,
+            enumerable: false
+          })
+        }
+        return stackValue
+      },
+      set: function (value) {
+        stackValue = value
+        stackCaptured = true
+      }
+    })
 
     // redefine the error message
     Object.defineProperty(err, 'message', {
@@ -196,16 +286,48 @@ function createIsHttpErrorFunction (HttpError) {
 function createServerErrorConstructor (HttpError, name, code) {
   var className = toClassName(name)
 
+  // Cache default message
+  var defaultMsg = statuses.message[code]
+
   function ServerError (message) {
     // create the error object
-    var msg = message != null ? message : statuses.message[code]
+    var msg = message != null ? message : defaultMsg
     var err = new Error(msg)
-
-    // capture a stack trace to the construction point
-    Error.captureStackTrace(err, ServerError)
 
     // adjust the [[Prototype]]
     setPrototypeOf(err, ServerError.prototype)
+
+    // Lazy stack trace - defer stack capture using property getter
+    var stackValue
+    var stackCaptured = false
+
+    // Delete existing stack property first
+    delete err.stack
+
+    Object.defineProperty(err, 'stack', {
+      enumerable: false,
+      configurable: true,
+      get: function () {
+        if (!stackCaptured) {
+          // Capture stack trace on first access
+          Error.captureStackTrace(this, ServerError)
+          stackValue = this.stack
+          stackCaptured = true
+          // Replace getter with direct value for performance
+          Object.defineProperty(this, 'stack', {
+            value: stackValue,
+            writable: true,
+            configurable: true,
+            enumerable: false
+          })
+        }
+        return stackValue
+      },
+      set: function (value) {
+        stackValue = value
+        stackCaptured = true
+      }
+    })
 
     // redefine the error message
     Object.defineProperty(err, 'message', {
